@@ -27,7 +27,6 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
-      actions: read
       id-token: write
     env:
       # Claude Code removes the credentials it knows of, among them the
