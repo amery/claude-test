@@ -3,7 +3,7 @@
 all: check
 
 check:
-	node --check src/cart.js
+	node --input-type=module --check < src/cart.js
 
 env-check:
 	sh scripts/env-check.sh
