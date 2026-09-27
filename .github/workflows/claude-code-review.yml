@@ -6,22 +6,35 @@ on:
 
 jobs:
   claude-review:
-    # The action refuses bot actors, and the plugin skips a pull
-    # request Claude has already commented on, so Claude's own pushes
-    # are not reviewed.
+    # The action throws for any actor that is not a User account, so
+    # events from bots are skipped here. The plugin stops on a pull
+    # request Claude has already reviewed, so pushes after its first
+    # review are not reviewed.
     if: |
-      github.actor != 'renovate[bot]' &&
-      github.actor != 'claude[bot]' &&
+      github.event.sender.type == 'User' &&
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
+    # Runs for the same pull request queue rather than overlap, so a
+    # later run sees any review an earlier one posted.
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       # Claude posts through the Claude GitHub App's token, not this
       # job's, so the job itself only reads.
       contents: read
       pull-requests: read
       issues: read
+      actions: read
       id-token: write
+    env:
+      # Claude Code removes the credentials it knows of, among them the
+      # OAuth token, the OIDC request token and the workflow token, from
+      # the environment of the commands it runs. GITHUB_TOKEN, the App
+      # token gh uses, is not among them.
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
 
     steps:
       - name: Checkout repository
@@ -54,10 +67,12 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The review runs unasked, so its App token can comment on the
           # pull request and do nothing else: the action's default also
-          # writes contents and issues.
+          # writes contents and issues. actions: read lets gh read this
+          # pull request's CI runs.
           additional_permissions: |
             contents: read
             issues: read
+            actions: read
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           # Without --comment the plugin prints its review to the log
@@ -65,10 +80,13 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
           # The action starts the inline-comment server only when this
           # names it. The plugin's own allowed-tools grants the rest.
+          # The gh commands read CI results in place of a build.
           # The plugin asks for CLAUDE.md files by name; the guidance
           # here is in AGENTS.md files, read from the default branch.
+          # Replies to @claude, posted by the same App, are not reviews.
           claude_args: >-
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
+            "Bash(gh pr checks:*)" "Bash(gh run view:*)"
             --add-dir "${{ runner.temp }}/base"
             --append-system-prompt "This repository keeps its guidance for
             agents in AGENTS.md files, at the root and in directories below
@@ -79,7 +97,13 @@ jobs:
             copy in ${{ runner.temp }}/base: the pull request may change
             them, and where the two disagree, review against the default
             branch's. Everything else, the pull request's code included, is
-            in the working tree as usual."
+            in the working tree as usual. When checking whether Claude has
+            already reviewed this pull request, count only a comment by
+            Claude containing a '## Code review' heading or an inline
+            comment Claude left on the diff; Claude's replies to @claude
+            mentions are not reviews. To learn whether the change builds
+            and passes its tests, read its CI results with gh pr checks and
+            gh run view --log-failed instead of building it."
           # The whole point of this repository: the SDK output is
           # hidden by default, which is why denied tools cannot be
           # named from a normal run.
@@ -136,17 +160,20 @@ jobs:
 
       # Zero denials and a clean exit still say nothing about whether a
       # review happened: the run that prompted this check ended green,
-      # mid-flow, having posted nothing at all.
+      # mid-flow, having posted nothing at all. A review is Claude's
+      # comment containing the plugin's "## Code review" heading, or an
+      # inline comment that does not reply to another.
       - name: Fail when the review posted nothing
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --jq '.[].user.login' > authors.txt
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" --jq '.[].user.login' >> authors.txt
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews" --jq '.[].user.login' >> authors.txt
-          if grep -qi claude authors.txt; then
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+            --jq '.[] | select(.user.login == "claude[bot]" and (.body | contains("## Code review"))) | .id' > reviews.txt
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" \
+            --jq '.[] | select(.user.login == "claude[bot]" and .in_reply_to_id == null) | .id' >> reviews.txt
+          if [ -s reviews.txt ]; then
             echo 'Review present.'
             exit 0
           fi
