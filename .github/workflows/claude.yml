@@ -106,8 +106,11 @@ jobs:
           additional_permissions: |
             actions: read
             contents: ${{ steps.origin.outputs.fork == 'false' && 'write' || 'read' }}
+          # With the subprocess scrub, Claude Code replaces the action's
+          # acceptEdits permission mode with the default one, so edits
+          # inside the workspace are granted here by path.
           claude_args: >-
-            ${{ steps.origin.outputs.fork == 'false' && '--allowedTools "Bash(make:*)"' || '' }}
+            ${{ steps.origin.outputs.fork == 'false' && '--allowedTools "Bash(make:*)" "Edit(./**)"' || '' }}
             --add-dir "${{ runner.temp }}/base"
             --append-system-prompt "This repository keeps its guidance for
             agents in AGENTS.md files, at the root and in directories below
