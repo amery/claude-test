@@ -54,6 +54,18 @@ jobs:
           persist-credentials: false
       - run: mv .base "$RUNNER_TEMP/base"
 
+      # Claude Code refuses to scrub subprocess environments without
+      # bubblewrap, which also runs those subprocesses in their own PID
+      # namespace. Ubuntu restricts the unprivileged user namespaces it
+      # needs unless told otherwise.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
