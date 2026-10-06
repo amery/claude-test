@@ -1,7 +1,10 @@
 name: Claude Code Review
 
+# pull_request_target runs the default branch's copy of this workflow,
+# with the repository's secrets, for a fork's pull request too. Nothing
+# from the pull request runs here: Claude reads it.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, ready_for_review, reopened]
 
 jobs:
@@ -11,8 +14,7 @@ jobs:
     # once: the check for an earlier review skips later pushes.
     if: |
       github.event.sender.type == 'User' &&
-      !github.event.pull_request.draft &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      !github.event.pull_request.draft
     # Runs for the same pull request run one at a time, so a later run
     # sees any review an earlier one posted. GitHub keeps one waiting
     # run per group: a newer push cancels one still waiting.
@@ -32,12 +34,36 @@ jobs:
     # Every step continues on error: a failure shows as an annotation
     # on the run, and the job still passes.
     steps:
-      # Left in place, this job's token sits in .git/config, in the
-      # workspace Claude reads.
-      - name: Checkout repository
+      # The action runs Claude only for an actor with write access,
+      # whoever opened or pushed to the pull request. For anyone else a
+      # maintainer asks for the review with "@claude full review".
+      - name: Check the actor's access
+        id: access
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          permission=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" --jq .permission)
+          case "$permission" in
+          admin|write)
+            allowed=true
+            ;;
+          *)
+            allowed=false
+            ;;
+          esac
+          echo "allowed=$allowed" | tee -a "$GITHUB_OUTPUT"
+
+      # pull_request_target checks out the default branch unless told
+      # otherwise. Left in place, this job's token sits in .git/config,
+      # in the workspace Claude reads.
+      - name: Checkout the pull request
+        if: steps.access.outputs.allowed == 'true'
         continue-on-error: true
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -49,6 +75,7 @@ jobs:
       # made here.
       - name: Look for an earlier review
         id: earlier
+        if: steps.access.outputs.allowed == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -170,19 +197,22 @@ jobs:
           fi
 
       # The action reports success whether or not a review was posted.
-      # Without an execution file Claude never ran: a step before it
-      # failed, or the action skipped a pull request that changes this
-      # workflow. A review is found by its report, as in the check for
-      # an earlier one, whichever run or session posted it, so one that
-      # failed before its report counts as missing. When there is none,
-      # a status comment on the pull request says so, updated by later
-      # runs and deleted once a review is posted.
+      # Without an execution file Claude never ran: the actor has no
+      # write access, a step before it failed, or the action stopped
+      # before starting Claude. A review is found by its report, as in
+      # the check for an earlier one, whichever run or session posted
+      # it, so one that failed before its report counts as missing. When
+      # there is none, a status comment on the pull request says so,
+      # updated by later runs and deleted once a review is posted.
       - name: Report a missing review
         if: always()
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          ACTOR: ${{ github.actor }}
+          ACCESS: ${{ steps.access.outcome }}
+          ALLOWED: ${{ steps.access.outputs.allowed }}
           EARLIER: ${{ steps.earlier.outcome }}
           GUIDANCE: ${{ steps.guidance.outcome }}
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
@@ -204,12 +234,16 @@ jobs:
           fi
           if [ -f "$EXECUTION_FILE" ]; then
             message="Claude's review ran but posted no report."
+          elif [ "$ACCESS" = failure ]; then
+            message="Claude's review did not run: the check of ${ACTOR}'s access failed."
+          elif [ "$ALLOWED" != true ]; then
+            message="Claude's review did not run: ${ACTOR} has no write access here. A maintainer can ask for it with \`@claude full review\`."
           elif [ "$EARLIER" = failure ]; then
             message="Claude's review did not run: the check for an earlier review failed."
           elif [ "$GUIDANCE" = failure ]; then
             message="Claude's review did not run: the default branch's guidance could not be checked out."
           else
-            message="Claude's review did not run, as on a pull request that changes the review workflow."
+            message="Claude's review did not start."
           fi
           echo "::warning title=No review posted::$message"
           body="${MARKER}
