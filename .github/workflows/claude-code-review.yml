@@ -105,12 +105,14 @@ jobs:
             issues: read
             actions: read
           # Skill runs the skill and the plugin's command, whose own
-          # allowed-tools grant the rest. The action starts the
+          # allowed-tools grant the rest, but not the gh commands that
+          # read CI results in place of a build. The action starts the
           # inline-comment server only when this names it. The appended
           # prompt says where the default branch's copy is.
           claude_args: >-
             --allowedTools "Skill"
             "mcp__github_inline_comment__create_inline_comment"
+            "Bash(gh pr checks:*)" "Bash(gh run view:*)"
             --add-dir "${{ runner.temp }}/base"
             --append-system-prompt "The default branch's copy of this
             repository is in ${{ runner.temp }}/base."
