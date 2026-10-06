@@ -20,8 +20,10 @@ jobs:
         (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') && github.event.pull_request.head.repo.full_name == github.repository) ||
         (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
       )
-    # Sessions for the same issue or pull request queue rather than
-    # overlap, so they do not push to one branch at once.
+    # Sessions for the same issue or pull request run one at a time,
+    # so they do not push to one branch at once. GitHub keeps one
+    # waiting run per group: a newer request cancels one still
+    # waiting, and nothing reports it.
     concurrency:
       group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: false
@@ -38,11 +40,11 @@ jobs:
     # Every step continues on error: a failure shows as an annotation
     # on the run, and the job still passes.
     steps:
-      # Claude's push goes to this repository, never to a fork, and a
-      # fork's code must not run here. On a fork's pull request Claude
-      # gets no toolchain, no make, and an App token without write
-      # access to contents. Anything but an explicit "false" counts as
-      # a fork.
+      # Claude pushes with an App token for this repository, not for a
+      # fork, and a fork's code must not run here. On a fork's pull
+      # request the toolchain is not set up, make is not granted, and
+      # the App token has no write access to contents. Anything but an
+      # explicit "false" counts as a fork.
       - name: Check whether the pull request comes from a fork
         id: origin
         continue-on-error: true

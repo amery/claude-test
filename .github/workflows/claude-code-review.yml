@@ -13,8 +13,9 @@ jobs:
       github.event.sender.type == 'User' &&
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
-    # Runs for the same pull request queue rather than overlap, so a
-    # later run sees any review an earlier one posted.
+    # Runs for the same pull request run one at a time, so a later run
+    # sees any review an earlier one posted. GitHub keeps one waiting
+    # run per group: a newer push cancels one still waiting.
     concurrency:
       group: claude-review-${{ github.event.pull_request.number }}
       cancel-in-progress: false
@@ -31,16 +32,21 @@ jobs:
     # Every step continues on error: a failure shows as an annotation
     # on the run, and the job still passes.
     steps:
+      # Left in place, this job's token sits in .git/config, in the
+      # workspace Claude reads.
       - name: Checkout repository
         continue-on-error: true
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          persist-credentials: false
 
-      # A review is Claude's comment containing the plugin's "## Code
-      # review" heading, or an inline comment that does not reply to
-      # another. The plugin's own check reads gh pr view --comments,
-      # which leaves inline comments out, so the check is made here.
+      # A review is Claude's comment containing the "## Code review"
+      # heading, which the full-review skill posts whether or not it
+      # found issues. An inline comment does not count: @claude can
+      # post one outside a review. The plugin's own check stops at any
+      # comment by Claude, so the skill sets it aside and the check is
+      # made here.
       - name: Look for an earlier review
         id: earlier
         continue-on-error: true
@@ -50,8 +56,6 @@ jobs:
         run: |
           gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
             --jq '.[] | select(.user.login == "claude[bot]" and (.body | contains("## Code review"))) | .id' > "$RUNNER_TEMP/earlier.txt"
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" \
-            --jq '.[] | select(.user.login == "claude[bot]" and .in_reply_to_id == null) | .id' >> "$RUNNER_TEMP/earlier.txt"
           if [ -s "$RUNNER_TEMP/earlier.txt" ]; then
             reviewed=true
           else
@@ -96,10 +100,10 @@ jobs:
           # the action restores .claude from it, runs the plugin with
           # this repository's rules and posts the findings.
           prompt: '/full-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # The review runs unasked, so its App token can comment on the
-          # pull request and read its CI runs, and nothing else: the
-          # action's default also writes contents and issues. gh, run by
-          # Claude, uses this token.
+          # The review runs unasked, so its App token reads contents,
+          # issues and CI runs, and writes to pull requests to comment;
+          # the action's default also writes contents and issues. gh,
+          # run by Claude, uses this token.
           additional_permissions: |
             contents: read
             issues: read
@@ -163,9 +167,11 @@ jobs:
           fi
 
       # The action reports success whether or not a review was posted.
-      # Without an execution file Claude never ran, as when the action
-      # skips a pull request that changes this workflow. A review is
-      # found as in the check for an earlier one. When there is none,
+      # Without an execution file Claude never ran: a step before it
+      # failed, or the action skipped a pull request that changes this
+      # workflow. A review is found by its report, as in the check for
+      # an earlier one, whichever run or session posted it, so one that
+      # failed before its report counts as missing. When there is none,
       # a status comment on the pull request says so, updated by later
       # runs and deleted once a review is posted.
       - name: Report a missing review
@@ -174,23 +180,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          REVIEWED: ${{ steps.earlier.outputs.reviewed }}
+          EARLIER: ${{ steps.earlier.outcome }}
+          GUIDANCE: ${{ steps.guidance.outcome }}
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
           MARKER: '<!-- claude-review-status -->'
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "$REVIEWED" = true ]; then
-            echo 'Reviewed by an earlier run; this run skipped the review.'
-            exit 0
-          fi
           comments="repos/${GITHUB_REPOSITORY}/issues/${PR}/comments"
           gh api --paginate "$comments" \
             --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith(env.MARKER))) | .id' > "$RUNNER_TEMP/status.txt"
           read -r status < "$RUNNER_TEMP/status.txt" || status=
           gh api --paginate "$comments" \
             --jq '.[] | select(.user.login == "claude[bot]" and (.body | contains("## Code review"))) | .id' > "$RUNNER_TEMP/reviews.txt"
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" \
-            --jq '.[] | select(.user.login == "claude[bot]" and .in_reply_to_id == null) | .id' >> "$RUNNER_TEMP/reviews.txt"
           if [ -s "$RUNNER_TEMP/reviews.txt" ]; then
             echo 'Review present.'
             if [ -n "$status" ]; then
@@ -198,10 +199,14 @@ jobs:
             fi
             exit 0
           fi
-          if [ ! -f "$EXECUTION_FILE" ]; then
-            message="Claude's review did not run, as on a pull request that changes the review workflow."
+          if [ -f "$EXECUTION_FILE" ]; then
+            message="Claude's review ran but posted no report."
+          elif [ "$EARLIER" = failure ]; then
+            message="Claude's review did not run: the check for an earlier review failed."
+          elif [ "$GUIDANCE" = failure ]; then
+            message="Claude's review did not run: the default branch's guidance could not be checked out."
           else
-            message="Claude's review ran but posted nothing."
+            message="Claude's review did not run, as on a pull request that changes the review workflow."
           fi
           echo "::warning title=No review posted::$message"
           body="${MARKER}

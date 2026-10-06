@@ -37,6 +37,11 @@ changes, and pass the changes on to every agent it starts:
   code included, is in the working tree as usual.
 - A review was asked for, so do not stop because Claude has already
   commented on the pull request or reviewed it.
+- When issues were found, after posting the inline comments, post a
+  report with `gh pr comment` as well, in the plugin's format for no
+  issues: a `## Code review` heading, then one line per issue naming
+  it, with a link to the code. The automatic review job finds an
+  earlier review by that heading.
 - To learn whether the change builds and passes its tests, read its CI
   results with `gh pr checks` and `gh run view --log-failed` instead of
   building it.
