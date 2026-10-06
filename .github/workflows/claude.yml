@@ -71,8 +71,10 @@ jobs:
       # The action checks out a pull request's head over the workspace,
       # AGENTS.md files included, so Claude reads the default branch's,
       # kept outside the workspace where nothing commits them, and does
-      # not run without them.
+      # not run without them. A failed checkout still leaves .base
+      # behind, so the move waits for the checkout's outcome.
       - name: Checkout the default branch's guidance
+        id: guidance
         continue-on-error: true
         uses: actions/checkout@v7
         with:
@@ -81,7 +83,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Move the guidance out of the workspace
-        id: guidance
+        id: moved
+        if: steps.guidance.outcome == 'success'
         continue-on-error: true
         run: mv .base "$RUNNER_TEMP/base"
 
@@ -94,7 +97,7 @@ jobs:
 
       - name: Run Claude Code
         id: claude
-        if: steps.guidance.outcome == 'success'
+        if: steps.moved.outcome == 'success'
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         env:
